@@ -13,6 +13,7 @@ import re
 import textwrap
 import typing
 import warnings
+from operator import itemgetter
 from typing import (
     Any,
     Callable,
@@ -567,6 +568,42 @@ def _split_tensor_list_constants(g, block):
 
 
 @_beartype.beartype
+def _sort_module_scopes_descending_depth(
+    modules_to_export: Collection[Type[torch.nn.Module]], graph: torch.Graph
+) -> List[str]:
+    modules_as_onnx_functions = [
+        ".".join([module_type.__module__, module_type.__name__])
+        for module_type in modules_to_export
+    ]
+
+    scope_depth: Dict[str, int] = {}
+    for node in graph.nodes():
+        scope = node.scopeName()
+
+        # We need to store the scope up until the deepest occurrence of one of
+        # the requested models.
+        max_index = -1
+        max_module = None
+        for module in modules_as_onnx_functions:
+            index = scope.rfind(module)
+            if index > max_index:
+                max_index = index
+                max_module = module
+
+        if max_index == -1:
+            continue
+
+        leaf_scope = scope[: max_index + len(f"{max_module}::")]
+        if leaf_scope not in scope_depth:
+            scope_depth[leaf_scope] = len(leaf_scope.split("/"))
+
+    return [
+        scope
+        for scope, _ in sorted(scope_depth.items(), key=itemgetter(1), reverse=True)
+    ]
+
+
+@_beartype.beartype
 def _optimize_graph(
     graph: _C.Graph,
     operator_export_type: _C_onnx.OperatorExportTypes,
@@ -576,6 +613,7 @@ def _optimize_graph(
     dynamic_axes=None,
     input_names=None,
     module=None,
+    export_modules_as_functions: Union[bool, Collection[Type[torch.nn.Module]]] = False,
 ):
     if params_dict is None:
         params_dict = {}
@@ -606,7 +644,15 @@ def _optimize_graph(
     # CSE should improve perf when Autocast is used with disabled cache
     # Autocast is disabled due to a limitation on tracer as described at https://github.com/pytorch/pytorch/issues/84092
     # Must run before _C._jit_pass_erase_number_types to prevent type substitution
-    if _C._jit_pass_cse(graph):
+
+    # sort modules by largest depth first
+    module_scopes = []
+    if export_modules_as_functions:
+        module_scopes = _sort_module_scopes_descending_depth(
+            export_modules_as_functions, graph
+        )
+
+    if _C._jit_pass_cse(graph, module_scopes):
         _C._jit_pass_onnx_lint(graph)
 
     _C._jit_pass_canonicalize_graph_fuser_ops(graph)
@@ -1098,6 +1144,7 @@ def _model_to_graph(
     fixed_batch_size=False,
     training=_C_onnx.TrainingMode.EVAL,
     dynamic_axes=None,
+    export_modules_as_functions=False,
 ) -> Tuple[
     _C.Graph,
     Dict[str, torch.Tensor],
@@ -1140,6 +1187,7 @@ def _model_to_graph(
             dynamic_axes=dynamic_axes,
             input_names=input_names,
             module=module,
+            export_modules_as_functions=export_modules_as_functions,
         )
     except Exception as e:
         torch.onnx.log("Torch IR graph at exception: ", graph)
@@ -1585,6 +1633,7 @@ def _export(
                 fixed_batch_size=fixed_batch_size,
                 training=training,
                 dynamic_axes=dynamic_axes,
+                export_modules_as_functions=export_modules_as_functions,
             )
 
             # TODO: Don't allocate a in-memory string for the protobuf

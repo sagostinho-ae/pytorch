@@ -5,7 +5,9 @@
 #include <torch/csrc/jit/ir/node_hashing.h>
 #include <torch/csrc/jit/jit_log.h>
 
+#include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace torch {
 namespace jit {
@@ -15,15 +17,31 @@ struct CommonSubexpressionEliminator {
   CommonSubexpressionEliminator(std::shared_ptr<Graph> graph)
       : graph_(std::move(graph)) {}
 
-  bool run(std::function<Node*(Node*)> parent_lookup_fn) {
-    return run(graph_->block(), std::move(parent_lookup_fn));
+  bool run(
+      std::function<Node*(Node*)> parent_lookup_fn,
+      const std::vector<std::string>& modules_as_onnx_functions =
+          std::vector<std::string>()) {
+    return run(
+        graph_->block(),
+        std::move(parent_lookup_fn),
+        modules_as_onnx_functions);
   }
 
   // The function implements common subexpression elimination.
   // Since the nodes are visited in topological order, one pass is enough.
   // returns true if CSE made changes to a graph
-  bool run(Block* block, std::function<Node*(Node*)> parent_lookup_fn) {
-    std::unordered_set<Node*, HashNode, EqualNode> subexprs;
+  bool run(
+      Block* block,
+      std::function<Node*(Node*)> parent_lookup_fn,
+      const std::vector<std::string>& modules_as_onnx_functions) {
+    using namespace std::string_literals;
+
+    using SubExprT = std::unordered_set<Node*, HashNode, EqualNode>;
+    std::unordered_map<std::string, SubExprT> subexprs_all_scopes{
+        {"", SubExprT()}};
+    for (const auto& module_scope : modules_as_onnx_functions)
+      subexprs_all_scopes.insert({module_scope, SubExprT()});
+
     bool changed = false;
     for (auto it = block->nodes().begin(); it != block->nodes().end(); ++it) {
       auto node = *it;
@@ -44,17 +62,28 @@ struct CommonSubexpressionEliminator {
         continue;
       }
 
+      std::string scope = ""s;
+      // modules_as_onnx_functions, come ordered by depth. So if we get a hit
+      for (const auto& module_scope : modules_as_onnx_functions) {
+        if (node->scopeName().find(module_scope) != std::string::npos)
+          scope = module_scope;
+      }
+      auto subexprs = subexprs_all_scopes[scope];
+
       if (!node->blocks().empty()) {
         // Traverse sub-blocks.
         for (auto block : node->blocks()) {
-          changed |= run(block, [&](Node* n) {
-            auto existing = subexprs.find(n);
-            if (existing != subexprs.end()) {
-              return *existing;
-            }
+          changed |= run(
+              block,
+              [&](Node* n) {
+                auto existing = subexprs.find(n);
+                if (existing != subexprs.end()) {
+                  return *existing;
+                }
 
-            return parent_lookup_fn(n);
-          });
+                return parent_lookup_fn(n);
+              },
+              modules_as_onnx_functions);
         }
 
         continue;
@@ -121,10 +150,12 @@ struct CommonSubexpressionEliminator {
 
 } // namespace
 
-bool EliminateCommonSubexpression(const std::shared_ptr<Graph>& graph) {
+bool EliminateCommonSubexpression(
+    const std::shared_ptr<Graph>& graph,
+    const std::vector<std::string>& modules_as_onnx_functions) {
   GRAPH_DUMP("Before CSE", graph);
   CommonSubexpressionEliminator cse(graph);
-  return cse.run([](Node*) { return nullptr; });
+  return cse.run([](Node*) { return nullptr; }, modules_as_onnx_functions);
 }
 } // namespace jit
 } // namespace torch

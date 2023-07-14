@@ -290,9 +290,13 @@ void initJITBindings(PyObject* module) {
           })
       .def(
           "_jit_pass_cse",
-          [](std::shared_ptr<Graph>& g) {
-            return EliminateCommonSubexpression(g); // overload resolution
-          })
+          [](std::shared_ptr<Graph>& g,
+             const std::vector<std::string>& modules_as_onnx_functions) {
+            return EliminateCommonSubexpression(
+                g, modules_as_onnx_functions); // overload resolution
+          },
+          py::arg("graph"),
+          py::arg("modules_as_onnx_functions"))
       .def(
           "_jit_pass_fuse_quantized_add_relu",
           [](std::shared_ptr<Graph>& g) {
