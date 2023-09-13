@@ -20,6 +20,7 @@ from typing import (
     cast,
     Collection,
     Dict,
+    Iterable,
     List,
     Mapping,
     Optional,
@@ -569,12 +570,8 @@ def _split_tensor_list_constants(g, block):
 
 @_beartype.beartype
 def _sort_module_scopes_descending_depth(
-    modules_to_export: Collection[Type[torch.nn.Module]], graph: torch.Graph
+    graph: torch.Graph, modules_as_onnx_functions: Iterable[str]
 ) -> List[str]:
-    modules_as_onnx_functions = [
-        ".".join([module_type.__module__, module_type.__name__])
-        for module_type in modules_to_export
-    ]
 
     scope_depth: Dict[str, int] = {}
     for node in graph.nodes():
@@ -648,8 +645,16 @@ def _optimize_graph(
     # sort modules by largest depth first
     module_scopes = []
     if export_modules_as_functions:
+
+        if isinstance(export_modules_as_functions, Iterable):
+            modules_as_onnx_functions = [
+                ".".join([module_type.__module__, module_type.__name__])
+                for module_type in export_modules_as_functions
+            ]
+        else:
+            breakpoint()
         module_scopes = _sort_module_scopes_descending_depth(
-            export_modules_as_functions, graph
+            graph, modules_as_onnx_functions
         )
 
     if _C._jit_pass_cse(graph, module_scopes):
